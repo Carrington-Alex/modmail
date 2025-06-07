@@ -1,3 +1,5 @@
 settings.db
 .env
 *.png
+__pycache__\
+cofgs\__pycache__\
