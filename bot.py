@@ -27,39 +27,81 @@ intents.guilds = True
 intents.messages = True
 
 bot = commands.Bot(command_prefix=".", intents=intents)
+pending_users = set()
 open_tickets = {}
 
 from discord import ui
+from datetime import datetime, timezone, timedelta
+
+from discord import ui
+from datetime import datetime, timezone, timedelta
 
 class CloseTicketView(ui.View):
-    def __init__(self, author, ticket_channel_id):
+    def __init__(self, author, ticket_channel_id, mod_role_ids, open_tickets_ref, ticket_log_ref, bot_ref, save_ticket_log_func):
         super().__init__(timeout=None)
         self.author = author
         self.ticket_channel_id = ticket_channel_id
+        self.mod_role_ids = mod_role_ids
+        self.open_tickets = open_tickets_ref
+        self.ticket_log = ticket_log_ref
+        self.bot = bot_ref
+        self.save_ticket_log = save_ticket_log_func
 
     @ui.button(label="Close Ticket", style=discord.ButtonStyle.red, custom_id="close_ticket_btn")
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not any(role.id in MOD_ROLE_IDS for role in interaction.user.roles):
+        if not any(role.id in self.mod_role_ids for role in interaction.user.roles):
             return await interaction.response.send_message("❌ You are not authorized to close this ticket.", ephemeral=True)
 
         await interaction.response.send_message("🛑 Ticket closed. This channel will be deleted in 7 days.", ephemeral=False)
         await interaction.channel.set_permissions(interaction.guild.default_role, read_messages=False)
-        open_tickets[self.ticket_channel_id] = datetime.now(timezone.utc) + timedelta(days=7)
 
-        # Update ticket log
-        if str(self.ticket_channel_id) in ticket_log:
-            ticket_log[str(self.ticket_channel_id)]["closed_at"] = datetime.now(timezone.utc).isoformat()
-            ticket_log[str(self.ticket_channel_id)]["closed_by"] = str(interaction.user)
-            save_ticket_log(ticket_log)
+        self.open_tickets[self.ticket_channel_id] = datetime.now(timezone.utc) + timedelta(days=7)
 
-            user_id = ticket_log[str(self.ticket_channel_id)]["user_id"]
+        ticket_id = str(self.ticket_channel_id)
+        if ticket_id in self.ticket_log:
+            self.ticket_log[ticket_id]["closed_at"] = datetime.now(timezone.utc).isoformat()
+            self.ticket_log[ticket_id]["closed_by"] = str(interaction.user)
+            self.save_ticket_log(self.ticket_log)
+
+            user_id = self.ticket_log[ticket_id]["user_id"]
             try:
-                user = await bot.fetch_user(user_id)
-                await user.send(f"✅ Your ticket has been closed by **{interaction.user.display_name}**. If you need more help, feel free to open another case later.")
+                user = await self.bot.fetch_user(user_id)
+                await user.send(
+                    f"✅ Your ticket has been closed by **{interaction.user.display_name}**. "
+                    "If you need more help, feel free to open another case later."
+                )
             except Exception as e:
                 await interaction.channel.send(f"⚠️ Could not DM the user: {e}")
 
-            staff_channel = bot.get_channel(1380216605107028110)
+            staff_channel = self.bot.get_channel(1380216605107028110)
+            if staff_channel:
+                await staff_channel.send(
+                    f"📁 Ticket <#{interaction.channel.id}> was closed by **{interaction.user.display_name}**.\n"
+                    f"User: <@{user_id}>\n"
+                    f"Channel: `{interaction.channel.name}`"
+                )
+
+        # Update ticket log
+        ticket_id = str(self.ticket_channel_id)
+        if ticket_id in self.ticket_log:
+            self.ticket_log[ticket_id]["closed_at"] = datetime.now(timezone.utc).isoformat()
+            self.ticket_log[ticket_id]["closed_by"] = str(interaction.user)
+
+            # Persist updated ticket log
+            save_ticket_log(self.ticket_log)
+
+            user_id = self.ticket_log[ticket_id]["user_id"]
+            try:
+                user = await self.bot.fetch_user(user_id)
+                await user.send(
+                    f"✅ Your ticket has been closed by **{interaction.user.display_name}**. "
+                    "If you need more help, feel free to open another case later."
+                )
+            except Exception as e:
+                await interaction.channel.send(f"⚠️ Could not DM the user: {e}")
+
+            # Optional: Notify staff channel
+            staff_channel = self.bot.get_channel(1380216605107028110)
             if staff_channel:
                 await staff_channel.send(
                     f"📁 Ticket <#{interaction.channel.id}> was closed by **{interaction.user.display_name}**.\n"
@@ -268,7 +310,13 @@ async def on_message(message):
     if message.guild:
         settings = get_guild_settings(message.guild.id)
         mod_roles = settings["mod_role_ids"]
-        category_id = int(settings["ticket_category_id"])
+        category_id_raw = settings.get("ticket_category_id")
+        if category_id_raw is None:
+            await message.channel.send("⚠️ This server has not configured a ticket category yet. Please run /set_ticket_category.")
+            return
+
+        category_id = int(category_id_raw)
+
         log_channel_id = int(settings["log_channel_id"])
     else:
         settings = None
@@ -445,8 +493,16 @@ async def on_message(message):
             except:
                 pass
 
-        from views import CloseTicketView  # make sure this is correctly imported
-        view = CloseTicketView(author=message.author, ticket_channel_id=channel.id)
+        view = CloseTicketView(
+            author=message.author,
+            ticket_channel_id=channel.id,
+            mod_role_ids=MOD_ROLE_IDS,
+            open_tickets_ref=open_tickets,
+            ticket_log_ref=ticket_log,
+            bot_ref=bot,
+            save_ticket_log_func=save_ticket_log
+)
+
         mod_ping = " ".join(f"<@&{rid}>" for rid in mod_roles)
 
         await channel.send(content=mod_ping, files=files, embed=ticket_embed, view=view)
@@ -467,7 +523,9 @@ async def on_message(message):
 @bot.command(name="whohas")
 async def whohas(ctx, role_id: str):
     print(f"[DEBUG] .whohas triggered by {ctx.author} in {ctx.channel.name}")
-    settings = get_guild_settings(ctx.guild.id)
+    settings = await check_bot_config(ctx)
+    if settings is None:
+        return  # exit early if missing config
 
     try:
         role_id_int = int(role_id)

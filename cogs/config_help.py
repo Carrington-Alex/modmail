@@ -10,6 +10,27 @@ class ConfigHelp(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @app_commands.command(name="status", description="View current bot configuration")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def config_status(self, interaction: discord.Interaction):
+        settings = get_guild_settings(interaction.guild.id)
+
+        def fmt(value):
+            return f"`{value}`" if value else "❌ Not Set"
+
+        mod_roles = settings.get("mod_role_ids") or []
+        mod_roles_fmt = ", ".join(f"<@&{rid}>" for rid in mod_roles) if mod_roles else "❌ Not Set"
+
+        msg = (
+            f"📋 **Bot Configuration Status**\n\n"
+            f"• Mod Roles: {mod_roles_fmt}\n"
+            f"• Log Channel: {fmt(settings.get('log_channel_id'))}\n"
+            f"• Ticket Category: {fmt(settings.get('ticket_category_id'))}\n"
+            f"• Help Options: {len(settings.get('help_options', []))} configured"
+        )
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
     @app_commands.command(name="set_log_channel", description="Set the log channel for ticket logs")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(channel="The channel where logs should be posted")
